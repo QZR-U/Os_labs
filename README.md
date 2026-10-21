@@ -1,65 +1,87 @@
-# Лабораторна робота №2: FreeRTOS TLS (Thread Local Storage)
+# Лабораторна робота №3: Черги та тайм-аути у FreeRTOS
 
 * **Виконав:** Сеник Ярослав
-* **Варіант:** 18
+* **Варіант:** 18 $\to$ Варіант 8 ($18 \pmod{10} = 8$)
+* **Префікс задач:** `SEYA_`
 
 ---
 
 ## 1. Опис проєкту
 
-Проєкт демонструє використання механізму локального сховища потоків (Thread Local Storage, TLS) в операційній системі реального часу FreeRTOS на емуляторі під ОС Windows (порт WIN32-MSVC).
+Проєкт демонструє роботу з механізмом міжзадачної взаємодії через черги повідомлень (`xQueueCreate`, `xQueueSend`, `xQueueReceive`) та обробку граничних умов за допомогою тайм-аутів в операційній системі реального часу FreeRTOS (симулятор під ОС Windows / MSVC).
 
-Реалізовано $N_{tasks} = 3$ незалежних задач-воркерів (`vWorker`), кожен з яких зберігає власний контекст та профіль виконання у виділених слотах TLS ядра FreeRTOS без використання глобальних змінних.
+Реалізовано дві незалежні задачі:
+1. `SEYA_Producer` — генератор повідомлень фіксованої довжини (формат `"M%03u"`), що відправляє їх у чергу з таймаутом відправки 100 мс та циклічно змінює інтервал між ітераціями.
+2. `SEYA_Consumer` — приймач повідомлень, що очікує нові дані з черги з таймаутом блокування 200 мс.
 
-### Параметри варіанта №18
-* **Кількість задач ($N_{tasks}$):** 3
-* **Режим роботи (Mode):** `MODE_DELAY`
-* **Розмір буфера пакетного виводу (Burst $B$):** 8 рядків
-* **Слоти TLS:**
-  * Слот $V_1 = 0$: покажчик на структуру контексту `task_context_t` (`name`, `iter`, `checksum`, `delayTicksOrCycles`, `seed`, `lines[BURST_B][96]`, `bcnt`).
-  * Слот $V_2 = 1$: покажчик на структуру профілю `profile_t` (`mode`, `burstMode`, `baseDelayMs`, `baseCycles`, `step`).
-* **Базова затримка ($Base$):** 90 мс
-* **Крок затримки ($Step$):** 7 мс
-* **Затримка $i$-ї задачі:** $Delay_i = 90 + (7 \cdot i)$ мс
-* **Кількість ітерацій ($TotalIters$):** $10 \cdot 3 + 18 = 48$ ітерацій на задачу
-* **Контрольна сума:** CRC-8 SAE J1850 на основі номера ітерації та seed
+### Параметри варіанта №8 (18):
+* **Кількість задач:** 2 (`SEYA_Producer`, `SEYA_Consumer`)
+* **Тип елемента черги:** `char[5]` (5-байтний буфер рядка з термінатором `\0`, наприклад `"M001"`, `"M002"`)
+* **Розмір черги (`QUEUE_LEN`):** 5 елементів
+* **Тайм-аут відправки (`xQueueSend`):** 100 мс (`pdMS_TO_TICKS(100)`)
+* **Тайм-аут отримання (`xQueueReceive`):** 200 мс (`pdMS_TO_TICKS(200)`)
+* **Змінна затримка Producer:** циклічне перемикання значень затримок `{ 80ms, 120ms, 180ms, 260ms, 320ms }`.
 
 ---
 
-## 2. Структура коду
+## 2. Аналіз синхронізації та виникнення таймаутів
 
-* `FreeRTOSConfig.h` — увімкнено підтримку TLS та встановлено ліміт покажчиків:
-  ```c
-  #define configNUM_THREAD_LOCAL_STORAGE_POINTERS 5
+Коли затримка виробника (`Producer`) менша за таймаут споживача (80 мс, 120 мс, 180 мс $\le$ 200 мс):
+- Споживач прокидається та успішно зчитує повідомлення.
+
+Коли затримка виробника перевищує таймаут споживача (260 мс, 320 мс $>$ 200 мс):
+- Споживач вичерпує ліміт очікування у 200 мс та фіксує подію тайм-ауту:
+  ```text
+  [Consumer | SEYA] Timeout waiting for data at tick 582
   ```
-* `main.c` — перемикання режиму роботи на запуск blinky-демо:
-  ```c
-  #define mainCREATE_SIMPLE_BLINKY_DEMO_ONLY 1
-  ```
-* `main_blinky.c` — реалізація логіки лабораторної роботи:
-  * динамічне виділення пам'яті через `pvPortMalloc` та збереження покажчиків у TLS через `vTaskSetThreadLocalStoragePointer`;
-  * читання покажчиків контексту та профілю через `xTaskGetThreadLocalStoragePointer`;
-  * обчислення контрольної суми CRC-8 SAE J1850;
-  * пакетний вивід результатів (`burst_flush`) кожні 8 записів;
-  * коректне звільнення виділеної пам'яті (`vPortFree`), скидання TLS-покажчиків та завершення задач через `vTaskDelete`.
+- Після завершення паузи у 260 мс (тік 642) Producer відправляє повідомлення `M005`, яке Consumer успішно отримує на наступній ітерації.
 
 ---
 
-## 3. Інструкція із запуску проєкту
+## 3. Приклад виводу симуляції
 
-### Вимоги:
-* Visual Studio 2022 (з компонентом Desktop development with C++)
-* FreeRTOS Kernel (демо-оточення WIN32-MSVC)
+```text
+============================================================
+ FreeRTOS Lab 3: Queues & Timeouts (Variant 18 -> 8)
+ Student: Yaroslav Senyk (Senyk Yaroslav | SEYA_)
+ Queue length: 5, Item size: 5 bytes (char[5])
+ Send timeout: 100 ms, Receive timeout: 200 ms
+============================================================
 
-### Покроковий запуск:
-1. Завантажити ядро FreeRTOS або використати існуюче:
+[Producer | SEYA] Sent: 'M001' at tick 2 (next delay: 80ms)
+[Consumer | SEYA] Got: 'M001' at tick 2 (waiting: 0)
+[Producer | SEYA] Sent: 'M002' at tick 82 (next delay: 120ms)
+[Consumer | SEYA] Got: 'M002' at tick 82 (waiting: 80)
+[Producer | SEYA] Sent: 'M003' at tick 202 (next delay: 180ms)
+[Consumer | SEYA] Got: 'M003' at tick 202 (waiting: 120)
+[Producer | SEYA] Sent: 'M004' at tick 382 (next delay: 260ms)
+[Consumer | SEYA] Got: 'M004' at tick 382 (waiting: 180)
+[Consumer | SEYA] Timeout waiting for data at tick 582
+[Producer | SEYA] Sent: 'M005' at tick 642 (next delay: 320ms)
+[Consumer | SEYA] Got: 'M005' at tick 642 (waiting: 60)
+[Consumer | SEYA] Timeout waiting for data at tick 842
+[Producer | SEYA] Sent: 'M006' at tick 962 (next delay: 80ms)
+[Consumer | SEYA] Got: 'M006' at tick 962 (waiting: 120)
+```
+
+---
+
+## 4. Структура файлів
+
+* `main_blinky.c` (та `Blinky_Demo/main_blinky.c`) — реалізація логіки черг, задач виробника та споживача, обробка таймаутів.
+* `main.c` — перемикання у режим blinky-демо (`#define mainCREATE_SIMPLE_BLINKY_DEMO_ONLY 1`).
+* `FreeRTOSConfig.h` — конфігурація ядра FreeRTOS.
+
+---
+
+## 5. Запуск проєкту
+
+1. Завантажити ядро FreeRTOS (демо-оточення WIN32-MSVC):
    ```cmd
    git clone https://github.com/FreeRTOS/FreeRTOS.git
    cd FreeRTOS
    git submodule update --init --recursive
    ```
-2. Помістити файли `FreeRTOSConfig.h`, `main.c` та `main_blinky.c` у директорію:
-   `FreeRTOS/Demo/WIN32-MSVC/`
-3. Відкрити файл рішення `FreeRTOS/Demo/WIN32-MSVC/WIN32.sln` у Visual Studio.
-4. Зібрати та запустити проєкт комбінацією клавіш `Ctrl + F5` або `F5`.
-5. У консолі спостерігати пакетний вивід виконання задач із TLS.
+2. Скопіювати файли `main_blinky.c`, `main.c` та `FreeRTOSConfig.h` у директорію `FreeRTOS/Demo/WIN32-MSVC/`.
+3. Відкрити `WIN32.sln` у Visual Studio 2022.
+4. Запустити проєкт (`Ctrl + F5` або `F5`).
