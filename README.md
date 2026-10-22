@@ -1,40 +1,31 @@
-# Лабораторна робота №3: Черги та тайм-аути у FreeRTOS
+# Лабораторна робота №4: Синхронізація у FreeRTOS (Counting Semaphore + Mutex)
 
 * **Виконав:** Сеник Ярослав
-* **Варіант:** 18 $\to$ Варіант 8 ($18 \pmod{10} = 8$)
+* **Варіант:** 18 («Counting + Mutex комбіновано — пул ресурсів + спільна консоль»)
 * **Префікс задач:** `SEYA_`
 
 ---
 
 ## 1. Опис проєкту
 
-Проєкт демонструє роботу з механізмом міжзадачної взаємодії через черги повідомлень (`xQueueCreate`, `xQueueSend`, `xQueueReceive`) та обробку граничних умов за допомогою тайм-аутів в операційній системі реального часу FreeRTOS (симулятор під ОС Windows / MSVC).
-
-Реалізовано дві незалежні задачі:
-1. `SEYA_Producer` — генератор повідомлень фіксованої довжини (формат `"M%03u"`), що відправляє їх у чергу з таймаутом відправки 100 мс та циклічно змінює інтервал між ітераціями.
-2. `SEYA_Consumer` — приймач повідомлень, що очікує нові дані з черги з таймаутом блокування 200 мс.
-
-### Параметри варіанта №8 (18):
-* **Кількість задач:** 2 (`SEYA_Producer`, `SEYA_Consumer`)
-* **Тип елемента черги:** `char[5]` (5-байтний буфер рядка з термінатором `\0`, наприклад `"M001"`, `"M002"`)
-* **Розмір черги (`QUEUE_LEN`):** 5 елементів
-* **Тайм-аут відправки (`xQueueSend`):** 100 мс (`pdMS_TO_TICKS(100)`)
-* **Тайм-аут отримання (`xQueueReceive`):** 200 мс (`pdMS_TO_TICKS(200)`)
-* **Змінна затримка Producer:** циклічне перемикання значень затримок `{ 80ms, 120ms, 180ms, 260ms, 320ms }`.
+Проєкт демонструє комбіноване використання двох ключових примітивів синхронізації операційної системи реального часу FreeRTOS під Windows (симулятор WIN32-MSVC):
+1. **Підраховувальний семафор (`xSemaphoreCreateCounting`)** — керує пулом обмежених спільних ресурсів місткістю $N = 2$ слоти (`maxCount = 2`, `initialCount = 2`).
+2. **М'ютекс (`xSemaphoreCreateMutex`)** — забезпечує взаємне виключення при зверненні до спільного виводу (`stdout`/консоль), запобігаючи перемішуванню рядків від паралельних задач.
 
 ---
 
-## 2. Аналіз синхронізації та виникнення таймаутів
+## 2. Параметри та архітектура (Варіант 18)
 
-Коли затримка виробника (`Producer`) менша за таймаут споживача (80 мс, 120 мс, 180 мс $\le$ 200 мс):
-- Споживач прокидається та успішно зчитує повідомлення.
-
-Коли затримка виробника перевищує таймаут споживача (260 мс, 320 мс $>$ 200 мс):
-- Споживач вичерпує ліміт очікування у 200 мс та фіксує подію тайм-ауту:
-  ```text
-  [Consumer | SEYA] Timeout waiting for data at tick 582
-  ```
-- Після завершення паузи у 260 мс (тік 642) Producer відправляє повідомлення `M005`, яке Consumer успішно отримує на наступній ітерації.
+* **Кількість задач:** 5 паралельних задач-воркерів (`SEYA_W0` .. `SEYA_W4`).
+* **Пул ресурсів:** ліміт одночасного доступу — максимум 2 задачі.
+* **Тривалість роботи з ресурсом:** $T_{work} = 600 + (id \cdot 150)$ мс:
+  * `SEYA_W0`: 600 мс
+  * `SEYA_W1`: 750 мс
+  * `SEYA_W2`: 900 мс
+  * `SEYA_W3`: 1050 мс
+  * `SEYA_W4`: 1200 мс
+* **Пауза між запитами:** 500 мс.
+* **Потокобезпечний вивід:** функція `safe_printf(const char *fmt, ...)` із захопленням `xConsoleMutex` (`portMAX_DELAY`) та гарантованим викликом `fflush(stdout)`.
 
 ---
 
@@ -42,39 +33,42 @@
 
 ```text
 ============================================================
- FreeRTOS Lab 3: Queues & Timeouts (Variant 18 -> 8)
+ FreeRTOS Lab 4: Counting Semaphore + Mutex (Variant 18)
  Student: Yaroslav Senyk (Senyk Yaroslav | SEYA_)
- Queue length: 5, Item size: 5 bytes (char[5])
- Send timeout: 100 ms, Receive timeout: 200 ms
+ Resource Pool: 2 slots, Workers: 5 (SEYA_W0..SEYA_W4)
+ Synchronization: Counting Sem (Pool) + Mutex (Console)
 ============================================================
 
-[Producer | SEYA] Sent: 'M001' at tick 2 (next delay: 80ms)
-[Consumer | SEYA] Got: 'M001' at tick 2 (waiting: 0)
-[Producer | SEYA] Sent: 'M002' at tick 82 (next delay: 120ms)
-[Consumer | SEYA] Got: 'M002' at tick 82 (waiting: 80)
-[Producer | SEYA] Sent: 'M003' at tick 202 (next delay: 180ms)
-[Consumer | SEYA] Got: 'M003' at tick 202 (waiting: 120)
-[Producer | SEYA] Sent: 'M004' at tick 382 (next delay: 260ms)
-[Consumer | SEYA] Got: 'M004' at tick 382 (waiting: 180)
-[Consumer | SEYA] Timeout waiting for data at tick 582
-[Producer | SEYA] Sent: 'M005' at tick 642 (next delay: 320ms)
-[Consumer | SEYA] Got: 'M005' at tick 642 (waiting: 60)
-[Consumer | SEYA] Timeout waiting for data at tick 842
-[Producer | SEYA] Sent: 'M006' at tick 962 (next delay: 80ms)
-[Consumer | SEYA] Got: 'M006' at tick 962 (waiting: 120)
+[Task SEYA_W0] [WAITING] Requesting resource slot... (Tick: 2)
+[Task SEYA_W0] [ACQUIRED] Slot acquired! (Work: 600ms, Free slots remaining: 1) at tick 2
+[Task SEYA_W1] [WAITING] Requesting resource slot... (Tick: 2)
+[Task SEYA_W1] [ACQUIRED] Slot acquired! (Work: 750ms, Free slots remaining: 0) at tick 2
+[Task SEYA_W2] [WAITING] Requesting resource slot... (Tick: 2)
+[Task SEYA_W3] [WAITING] Requesting resource slot... (Tick: 2)
+[Task SEYA_W4] [WAITING] Requesting resource slot... (Tick: 2)
+[Task SEYA_W0] [RELEASED] Slot released! (Free slots now: 1) at tick 602
+[Task SEYA_W2] [ACQUIRED] Slot acquired! (Work: 900ms, Free slots remaining: 0) at tick 602
+[Task SEYA_W1] [RELEASED] Slot released! (Free slots now: 1) at tick 752
+[Task SEYA_W3] [ACQUIRED] Slot acquired! (Work: 1050ms, Free slots remaining: 0) at tick 752
+[Task SEYA_W0] [WAITING] Requesting resource slot... (Tick: 1102)
+[Task SEYA_W1] [WAITING] Requesting resource slot... (Tick: 1252)
+[Task SEYA_W2] [RELEASED] Slot released! (Free slots now: 1) at tick 1502
+[Task SEYA_W4] [ACQUIRED] Slot acquired! (Work: 1200ms, Free slots remaining: 0) at tick 1502
+[Task SEYA_W3] [RELEASED] Slot released! (Free slots now: 1) at tick 1802
+[Task SEYA_W0] [ACQUIRED] Slot acquired! (Work: 600ms, Free slots remaining: 0) at tick 1803
 ```
 
 ---
 
 ## 4. Структура файлів
 
-* `main_blinky.c` (та `Blinky_Demo/main_blinky.c`) — реалізація логіки черг, задач виробника та споживача, обробка таймаутів.
-* `main.c` — перемикання у режим blinky-демо (`#define mainCREATE_SIMPLE_BLINKY_DEMO_ONLY 1`).
-* `FreeRTOSConfig.h` — конфігурація ядра FreeRTOS.
+* `main_blinky.c` (та `Blinky_Demo/main_blinky.c`) — реалізація логіки пулу ресурсів, задач-воркерів, обгортки `safe_printf`.
+* `main.c` — перемикання режиму роботи (`#define mainCREATE_SIMPLE_BLINKY_DEMO_ONLY 1`).
+* `FreeRTOSConfig.h` — конфігураційні параметри ядра FreeRTOS.
 
 ---
 
-## 5. Запуск проєкту
+## 5. Інструкція із запуску проєкту
 
 1. Завантажити ядро FreeRTOS (демо-оточення WIN32-MSVC):
    ```cmd
@@ -83,5 +77,5 @@
    git submodule update --init --recursive
    ```
 2. Скопіювати файли `main_blinky.c`, `main.c` та `FreeRTOSConfig.h` у директорію `FreeRTOS/Demo/WIN32-MSVC/`.
-3. Відкрити `WIN32.sln` у Visual Studio 2022.
+3. Відкрити `WIN32.sln` у Visual Studio 2022 / 2026.
 4. Запустити проєкт (`Ctrl + F5` або `F5`).
