@@ -1,81 +1,108 @@
-# Лабораторна робота №4: Синхронізація у FreeRTOS (Counting Semaphore + Mutex)
+# Лабораторна робота №6: Буфери потоків, буфери повідомлень та групи подій у FreeRTOS
 
-* **Виконав:** Сеник Ярослав
-* **Варіант:** 18 («Counting + Mutex комбіновано — пул ресурсів + спільна консоль»)
+* **Студент:** Сеник Ярослав (Senyk Yaroslav)
 * **Префікс задач:** `SEYA_`
+* **Варіант:** 10 («Простий чат між двома вузлами через gateway»)
 
 ---
 
-## 1. Опис проєкту
+## 1. Опис завдання та архітектура (Варіант 10)
 
-Проєкт демонструє комбіноване використання двох ключових примітивів синхронізації операційної системи реального часу FreeRTOS під Windows (симулятор WIN32-MSVC):
-1. **Підраховувальний семафор (`xSemaphoreCreateCounting`)** — керує пулом обмежених спільних ресурсів місткістю $N = 2$ слоти (`maxCount = 2`, `initialCount = 2`).
-2. **М'ютекс (`xSemaphoreCreateMutex`)** — забезпечує взаємне виключення при зверненні до спільного виводу (`stdout`/консоль), запобігаючи перемішуванню рядків від паралельних задач.
+У роботі реалізовано консольну симуляцію чату між двома вузлами зв'язку через центральний шлюз (Gateway) з використанням примітивів міжзадачної взаємодії FreeRTOS:
+* **Stream Buffer (Буфер потоку)** для передачі неструктурованих байтових потоків.
+* **Message Buffer (Буфер повідомлень)** для передачі цілісних структурованих пакетів зі збереженням меж повідомлень.
+* **Event Group (Група подій)** для синхронізації стану вузлів, індикації наявності нових повідомлень та сигналізації про помилки форматування.
+
+### Задачі системи:
+1. **`SEYA_NodeA` (NodeATask):**
+   * Встановлює біт активності `BIT_A_ONLINE` в групі подій.
+   * Періодично передає неструктуровані текстові рядки байтів (`"Hello from Node A [seq=N]\n"`) у спільний Stream Buffer.
+2. **`SEYA_NodeB` (NodeBTask):**
+   * Встановлює біт активності `BIT_B_ONLINE` в групі подій.
+   * Періодично передає неструктуровані текстові рядки байтів (`"Ack from Node B [seq=N]\n"`) у спільний Stream Buffer.
+   * Для перевірки стійкості періодично інжектує некоректний порожній рядок для перевірки реакції шлюзу на помилку.
+3. **`SEYA_Gateway` (GatewayTask):**
+   * Зчитує байти зі спільного Stream Buffer посимвольно/потоково до символу нового рядка `\n`.
+   * Перевіряє валідність повідомлення: якщо виявлено порожній/дефектний пакет, встановлює `BIT_ERROR_FORMAT`.
+   * Формує структурований пакет `SEYA_ChatPacket_t` (ідентифікатор пакета, адреса відправника, адреса отримувача, довжина, корисне навантаження).
+   * Записує структурований пакет у Message Buffer та виставляє біт готовності `BIT_MSG_PENDING` у групі подій.
+4. **`SEYA_Monitor` (MonitorTask):**
+   * За допомогою `xEventGroupWaitBits()` очікує одночасної присутності в мережі обох вузлів (`BIT_A_ONLINE | BIT_B_ONLINE` з прапорцем `waitForAllBits = pdTRUE`).
+   * Після встановлення з'єднання відстежує події надходження повідомлень (`BIT_MSG_PENDING`) та помилок (`BIT_ERROR_FORMAT`).
+   * Зчитує готові пакети з Message Buffer та виводить детальний звіт інспекції трафіку.
+
+### Примітиви ядра FreeRTOS:
+1. **Stream Buffer (`xStreamBufferCreate`):**
+   * Розмір: 512 байт, trigger level = 1 байт.
+   * Забезпечує потокове транспортування сирих байтів від вузлів до шлюзу.
+2. **Message Buffer (`xMessageBufferCreate`):**
+   * Розмір: 1024 байти.
+   * Зберігає дискретні повідомлення зі збереженням їх довжини та меж запису.
+3. **Event Group (`xEventGroupCreate`):**
+   * `BIT_A_ONLINE` (`1 << 0`) — сигналізує про активність Node A.
+   * `BIT_B_ONLINE` (`1 << 1`) — сигналізує про активність Node B.
+   * `BIT_MSG_PENDING` (`1 << 2`) — сповіщає про наявність нового обробленого пакета у Message Buffer.
+   * `BIT_ERROR_FORMAT` (`1 << 3`) — сигналізує про детекцію пошкодженого/порожнього пакета.
 
 ---
 
-## 2. Параметри та архітектура (Варіант 18)
-
-* **Кількість задач:** 5 паралельних задач-воркерів (`SEYA_W0` .. `SEYA_W4`).
-* **Пул ресурсів:** ліміт одночасного доступу — максимум 2 задачі.
-* **Тривалість роботи з ресурсом:** $T_{work} = 600 + (id \cdot 150)$ мс:
-  * `SEYA_W0`: 600 мс
-  * `SEYA_W1`: 750 мс
-  * `SEYA_W2`: 900 мс
-  * `SEYA_W3`: 1050 мс
-  * `SEYA_W4`: 1200 мс
-* **Пауза між запитами:** 500 мс.
-* **Потокобезпечний вивід:** функція `safe_printf(const char *fmt, ...)` із захопленням `xConsoleMutex` (`portMAX_DELAY`) та гарантованим викликом `fflush(stdout)`.
-
----
-
-## 3. Приклад виводу симуляції
+## 2. Приклад логу виконання
 
 ```text
-============================================================
- FreeRTOS Lab 4: Counting Semaphore + Mutex (Variant 18)
- Student: Yaroslav Senyk (Senyk Yaroslav | SEYA_)
- Resource Pool: 2 slots, Workers: 5 (SEYA_W0..SEYA_W4)
- Synchronization: Counting Sem (Pool) + Mutex (Console)
-============================================================
+===================================================================
+ FreeRTOS Laboratory Work #6
+ Student: Senyk Yaroslav (SEYA_)
+ Variant: 10 ("Простий чат між двома вузлами через gateway")
+ Primitives: Stream Buffer + Message Buffer + Event Group
+===================================================================
 
-[Task SEYA_W0] [WAITING] Requesting resource slot... (Tick: 2)
-[Task SEYA_W0] [ACQUIRED] Slot acquired! (Work: 600ms, Free slots remaining: 1) at tick 2
-[Task SEYA_W1] [WAITING] Requesting resource slot... (Tick: 2)
-[Task SEYA_W1] [ACQUIRED] Slot acquired! (Work: 750ms, Free slots remaining: 0) at tick 2
-[Task SEYA_W2] [WAITING] Requesting resource slot... (Tick: 2)
-[Task SEYA_W3] [WAITING] Requesting resource slot... (Tick: 2)
-[Task SEYA_W4] [WAITING] Requesting resource slot... (Tick: 2)
-[Task SEYA_W0] [RELEASED] Slot released! (Free slots now: 1) at tick 602
-[Task SEYA_W2] [ACQUIRED] Slot acquired! (Work: 900ms, Free slots remaining: 0) at tick 602
-[Task SEYA_W1] [RELEASED] Slot released! (Free slots now: 1) at tick 752
-[Task SEYA_W3] [ACQUIRED] Slot acquired! (Work: 1050ms, Free slots remaining: 0) at tick 752
-[Task SEYA_W0] [WAITING] Requesting resource slot... (Tick: 1102)
-[Task SEYA_W1] [WAITING] Requesting resource slot... (Tick: 1252)
-[Task SEYA_W2] [RELEASED] Slot released! (Free slots now: 1) at tick 1502
-[Task SEYA_W4] [ACQUIRED] Slot acquired! (Work: 1200ms, Free slots remaining: 0) at tick 1502
-[Task SEYA_W3] [RELEASED] Slot released! (Free slots now: 1) at tick 1802
-[Task SEYA_W0] [ACQUIRED] Slot acquired! (Work: 600ms, Free slots remaining: 0) at tick 1803
+[SEYA_CHAT] Starting FreeRTOS Scheduler...
+[SEYA_CHAT] Monitor : Waiting for Node A and Node B to register online via Event Group...
+[SEYA_CHAT] Gateway : GatewayTask active. Listening to raw stream buffer...
+[SEYA_CHAT] Node A  : Online signal dispatched (BIT_A_ONLINE set).
+[SEYA_CHAT] Monitor : >>> BOTH NODES ONLINE! (EventBits=0x03). Network channel operational.
+
+[SEYA_CHAT] Node B  : Online signal dispatched (BIT_B_ONLINE set).
+[SEYA_CHAT] Node A  : Streaming raw bytes -> "Hello from Node A [seq=1]
+[SEYA_CHAT] Gateway : Formatted Packet #1 (Sender=A -> Recipient=B | "Hello from Node A [seq=1]"). Forwarding to Message Buffer.
+[SEYA_CHAT] Monitor : [INSPECT PACKET #1] A -> B | Length: 25 bytes | Text: "Hello from Node A [seq=1]" | Lifetime Packets: 1
+[SEYA_CHAT] Node B  : Streaming raw bytes -> "Ack from Node B [seq=1]
+[SEYA_CHAT] Gateway : Formatted Packet #2 (Sender=B -> Recipient=A | "Ack from Node B [seq=1]"). Forwarding to Message Buffer.
+[SEYA_CHAT] Monitor : [INSPECT PACKET #2] B -> A | Length: 23 bytes | Text: "Ack from Node B [seq=1]" | Lifetime Packets: 2
+[SEYA_CHAT] Node A  : Streaming raw bytes -> "Hello from Node A [seq=2]
+[SEYA_CHAT] Gateway : Formatted Packet #3 (Sender=A -> Recipient=B | "Hello from Node A [seq=2]"). Forwarding to Message Buffer.
+[SEYA_CHAT] Monitor : [INSPECT PACKET #3] A -> B | Length: 25 bytes | Text: "Hello from Node A [seq=2]" | Lifetime Packets: 3
+[SEYA_CHAT] Node B  : Streaming raw bytes -> "Ack from Node B [seq=2]
+[SEYA_CHAT] Gateway : Formatted Packet #4 (Sender=B -> Recipient=A | "Ack from Node B [seq=2]"). Forwarding to Message Buffer.
+[SEYA_CHAT] Monitor : [INSPECT PACKET #4] B -> A | Length: 23 bytes | Text: "Ack from Node B [seq=2]" | Lifetime Packets: 4
+[SEYA_CHAT] Node A  : Streaming raw bytes -> "Hello from Node A [seq=3]
+[SEYA_CHAT] Gateway : Formatted Packet #5 (Sender=A -> Recipient=B | "Hello from Node A [seq=3]"). Forwarding to Message Buffer.
+[SEYA_CHAT] Monitor : [INSPECT PACKET #5] A -> B | Length: 25 bytes | Text: "Hello from Node A [seq=3]" | Lifetime Packets: 5
+[SEYA_CHAT] Node B  : Injecting test malformed/empty packet to test BIT_ERROR_FORMAT...
+[SEYA_CHAT] Gateway : [!] Empty/malformed line detected! Setting BIT_ERROR_FORMAT.
+[SEYA_CHAT] Monitor : [ALERT] Event BIT_ERROR_FORMAT caught! Malformed packet logged. (Total Errors=1)
+[SEYA_CHAT] Node A  : Streaming raw bytes -> "Hello from Node A [seq=4]
+[SEYA_CHAT] Gateway : Formatted Packet #6 (Sender=A -> Recipient=B | "Hello from Node A [seq=4]"). Forwarding to Message Buffer.
+[SEYA_CHAT] Monitor : [INSPECT PACKET #6] A -> B | Length: 25 bytes | Text: "Hello from Node A [seq=4]" | Lifetime Packets: 6
+[SEYA_CHAT] Node B  : Streaming raw bytes -> "Ack from Node B [seq=3]
+[SEYA_CHAT] Gateway : Formatted Packet #7 (Sender=B -> Recipient=A | "Ack from Node B [seq=3]"). Forwarding to Message Buffer.
+[SEYA_CHAT] Monitor : [INSPECT PACKET #7] B -> A | Length: 23 bytes | Text: "Ack from Node B [seq=3]" | Lifetime Packets: 7
 ```
 
 ---
 
-## 4. Структура файлів
+## 3. Склад файлів проекту
 
-* `main_blinky.c` (та `Blinky_Demo/main_blinky.c`) — реалізація логіки пулу ресурсів, задач-воркерів, обгортки `safe_printf`.
-* `main.c` — перемикання режиму роботи (`#define mainCREATE_SIMPLE_BLINKY_DEMO_ONLY 1`).
-* `FreeRTOSConfig.h` — конфігураційні параметри ядра FreeRTOS.
+* `Blinky_Demo/main_blinky.c` — повна реалізація Лабораторної роботи №6 (Варіант 10).
+* `main_blinky.c` — копія для кореневої збірки/перегляду.
+* `main.c` — головна точка входу симулятора FreeRTOS (`mainCREATE_SIMPLE_BLINKY_DEMO_ONLY 1`).
+* `FreeRTOSConfig.h` — конфігураційний файл ядра FreeRTOS з увімкненою динамічною алокацією (`configSUPPORT_DYNAMIC_ALLOCATION 1`).
+* `open_sln.cmd` — скрипт для відкриття Visual Studio solution (`WIN32.sln`).
 
 ---
 
-## 5. Інструкція із запуску проєкту
+## 4. Інструкція із запуску
 
-1. Завантажити ядро FreeRTOS (демо-оточення WIN32-MSVC):
-   ```cmd
-   git clone https://github.com/FreeRTOS/FreeRTOS.git
-   cd FreeRTOS
-   git submodule update --init --recursive
-   ```
-2. Скопіювати файли `main_blinky.c`, `main.c` та `FreeRTOSConfig.h` у директорію `FreeRTOS/Demo/WIN32-MSVC/`.
-3. Відкрити `WIN32.sln` у Visual Studio 2022 / 2026.
-4. Запустити проєкт (`Ctrl + F5` або `F5`).
+1. Відкрити `open_sln.cmd` або `FreeRTOS/FreeRTOS/Demo/WIN32-MSVC/WIN32.sln` у Visual Studio.
+2. Обрати конфігурацію **Debug | x64**.
+3. Запустити виконання без налагодження (`Ctrl + F5`) або з налагодженням (`F5`).
