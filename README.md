@@ -1,81 +1,107 @@
-# Лабораторна робота №4: Синхронізація у FreeRTOS (Counting Semaphore + Mutex)
+# Лабораторна робота №5: Прямі сповіщення задач та програмні таймери у FreeRTOS
 
-* **Виконав:** Сеник Ярослав
-* **Варіант:** 18 («Counting + Mutex комбіновано — пул ресурсів + спільна консоль»)
+* **Студент:** Сеник Ярослав (Senyk Yaroslav)
 * **Префікс задач:** `SEYA_`
+* **Варіант:** 12 («Планувальник задач з дедлайнами» / EDF Deadline Scheduler)
 
 ---
 
-## 1. Опис проєкту
+## 1. Опис завдання та архітектура (Варіант 12)
 
-Проєкт демонструє комбіноване використання двох ключових примітивів синхронізації операційної системи реального часу FreeRTOS під Windows (симулятор WIN32-MSVC):
-1. **Підраховувальний семафор (`xSemaphoreCreateCounting`)** — керує пулом обмежених спільних ресурсів місткістю $N = 2$ слоти (`maxCount = 2`, `initialCount = 2`).
-2. **М'ютекс (`xSemaphoreCreateMutex`)** — забезпечує взаємне виключення при зверненні до спільного виводу (`stdout`/консоль), запобігаючи перемішуванню рядків від паралельних задач.
+У роботі реалізовано консольну симуляцію планувальника задач з дедлайнами (EDF-like) з використанням прямих сповіщень задач (**Direct-to-Task Notifications**) та програмних таймерів (**Software Timers**) у симуляторі FreeRTOS під Windows (порт WIN32-MSVC).
+
+### Задачі системи:
+1. **`SEYA_GenTask` (GeneratorTask):**
+   * Періодично формує нові завдання (Job ID, час виконання та відносний дедлайн).
+   * Передає інформацію планувальнику `SEYA_SchedTask` за допомогою `xTaskNotify(..., value, eSetValueWithOverwrite)`.
+2. **`SEYA_SchedTask` (SchedulerTask):**
+   * Отримує сповіщення про нові задачі та розпаковує Job ID і дедлайн.
+   * Зводить та запускає одноразовий таймер дедлайну (`xTimerChangePeriod` + `xTimerStart`).
+   * Будить виконавця `SEYA_WorkerTask`, надсилаючи Job ID через `xTaskNotify()`.
+   * Відстежує завершення робіт та настання дедлайнів за допомогою `ulTaskNotifyTake()` у режимі лічильного семафора.
+3. **`SEYA_WorkerTask` (WorkerTask):**
+   * Симулює корисне навантаження задачі через `vTaskDelay()`.
+   * Якщо задача встигає виконатися до дедлайну, зупиняє таймер дедлайну (`xTimerStop`) та надсилає сповіщення про успішне виконання `SEYA_LogTask` і токен завершення `SEYA_SchedTask`.
+   * Якщо дедлайн сплив, задача фіксує завершення із запізненням.
+4. **`SEYA_LogTask` (LoggerTask):**
+   * Отримує статусні події (`SEYA_EVENT_JOB_MET`, `SEYA_EVENT_DEADLINE_MISSED`, `SEYA_EVENT_JOB_LATE`).
+   * Виводить детальну статистику з префіксом `[SEYA_EDF]`, включно з кількістю успішних робіт, пропущених дедлайнів та Success Rate (%).
+
+### Програмні таймери:
+1. **Періодичний таймер (`SEYA_PeriodicTimer`, період 1200 мс):**
+   * В колбеку `prvPeriodicTimerCallback` пробуджує `SEYA_GenTask` через `xTaskNotifyGive()`.
+2. **Одноразовий таймер дедлайну (`SEYA_DeadlineTimer`, One-Shot):**
+   * Запускається на час дедлайну кожної задачі.
+   * У разі спрацювання до завершення WorkerTask надсилає пряме сповіщення `SEYA_LogTask` із кодом `SEYA_EVENT_DEADLINE_MISSED` та токен планувальнику `SEYA_SchedTask`.
+
+### Прямі сповіщення (Direct-to-Task Notifications):
+* **Value Carrier:** передача Job ID (старші 16 біт) та відносного дедлайну (молодші 16 біт) у 32-бітному значенні повідомлення через `xTaskNotify()`.
+* **Counting Semaphore:** підрахунок та облік завершених/пропущених робіт у планувальнику через `ulTaskNotifyTake(pdTRUE, portMAX_DELAY)`.
 
 ---
 
-## 2. Параметри та архітектура (Варіант 18)
-
-* **Кількість задач:** 5 паралельних задач-воркерів (`SEYA_W0` .. `SEYA_W4`).
-* **Пул ресурсів:** ліміт одночасного доступу — максимум 2 задачі.
-* **Тривалість роботи з ресурсом:** $T_{work} = 600 + (id \cdot 150)$ мс:
-  * `SEYA_W0`: 600 мс
-  * `SEYA_W1`: 750 мс
-  * `SEYA_W2`: 900 мс
-  * `SEYA_W3`: 1050 мс
-  * `SEYA_W4`: 1200 мс
-* **Пауза між запитами:** 500 мс.
-* **Потокобезпечний вивід:** функція `safe_printf(const char *fmt, ...)` із захопленням `xConsoleMutex` (`portMAX_DELAY`) та гарантованим викликом `fflush(stdout)`.
-
----
-
-## 3. Приклад виводу симуляції
+## 2. Приклад логу виконання
 
 ```text
-============================================================
- FreeRTOS Lab 4: Counting Semaphore + Mutex (Variant 18)
- Student: Yaroslav Senyk (Senyk Yaroslav | SEYA_)
- Resource Pool: 2 slots, Workers: 5 (SEYA_W0..SEYA_W4)
- Synchronization: Counting Sem (Pool) + Mutex (Console)
-============================================================
+===================================================================
+ FreeRTOS Laboratory Work #5
+ Student: Senyk Yaroslav (SEYA_)
+ Variant: 12 ("Планувальник задач з дедлайнами" / EDF)
+===================================================================
 
-[Task SEYA_W0] [WAITING] Requesting resource slot... (Tick: 2)
-[Task SEYA_W0] [ACQUIRED] Slot acquired! (Work: 600ms, Free slots remaining: 1) at tick 2
-[Task SEYA_W1] [WAITING] Requesting resource slot... (Tick: 2)
-[Task SEYA_W1] [ACQUIRED] Slot acquired! (Work: 750ms, Free slots remaining: 0) at tick 2
-[Task SEYA_W2] [WAITING] Requesting resource slot... (Tick: 2)
-[Task SEYA_W3] [WAITING] Requesting resource slot... (Tick: 2)
-[Task SEYA_W4] [WAITING] Requesting resource slot... (Tick: 2)
-[Task SEYA_W0] [RELEASED] Slot released! (Free slots now: 1) at tick 602
-[Task SEYA_W2] [ACQUIRED] Slot acquired! (Work: 900ms, Free slots remaining: 0) at tick 602
-[Task SEYA_W1] [RELEASED] Slot released! (Free slots now: 1) at tick 752
-[Task SEYA_W3] [ACQUIRED] Slot acquired! (Work: 1050ms, Free slots remaining: 0) at tick 752
-[Task SEYA_W0] [WAITING] Requesting resource slot... (Tick: 1102)
-[Task SEYA_W1] [WAITING] Requesting resource slot... (Tick: 1252)
-[Task SEYA_W2] [RELEASED] Slot released! (Free slots now: 1) at tick 1502
-[Task SEYA_W4] [ACQUIRED] Slot acquired! (Work: 1200ms, Free slots remaining: 0) at tick 1502
-[Task SEYA_W3] [RELEASED] Slot released! (Free slots now: 1) at tick 1802
-[Task SEYA_W0] [ACQUIRED] Slot acquired! (Work: 600ms, Free slots remaining: 0) at tick 1803
+[SEYA_EDF] Starting FreeRTOS Scheduler...
+[SEYA_EDF] LoggerTask online and logging execution statistics.
+[SEYA_EDF] SchedulerTask ready to schedule jobs and track deadlines.
+[SEYA_EDF] GeneratorTask initialized and waiting for timer triggers.
+[SEYA_EDF] Generator : Created Job #1 | Workload=400 ms | Relative Deadline=750 ms
+[SEYA_EDF] Scheduler : Scheduled Job #1 (Deadline: 750 ms). Arming one-shot timer.
+[SEYA_EDF] WorkerTask ready to execute jobs.
+[SEYA_EDF] Worker    : >>> Executing Job #1 (Simulated workload: 400 ms)...
+[SEYA_EDF] Logger    : [MET] Job #1 COMPLETED ON TIME! (Exec=400 ms <= Deadline=750 ms)
+[SEYA_EDF] Logger    : [STATS] Met: 1 | Missed: 0 | Total: 1 | Success Rate: 100.0%
+[SEYA_EDF] Scheduler : Accounting event processed via ulTaskNotifyTake(). Total tallied events=1
+[SEYA_EDF] Generator : Created Job #2 | Workload=850 ms | Relative Deadline=500 ms
+[SEYA_EDF] Scheduler : Scheduled Job #2 (Deadline: 500 ms). Arming one-shot timer.
+[SEYA_EDF] Worker    : >>> Executing Job #2 (Simulated workload: 850 ms)...
+[SEYA_EDF] Logger    : [!] *** MISSED DEADLINE *** Job #2! (Deadline 500 ms expired)
+[SEYA_EDF] Logger    : [STATS] Met: 1 | Missed: 1 | Total: 2 | Success Rate: 50.0%
+[SEYA_EDF] Scheduler : Accounting event processed via ulTaskNotifyTake(). Total tallied events=2
+[SEYA_EDF] Logger    : [LATE] Job #2 finished overdue workload (850 ms) after deadline.
+[SEYA_EDF] Generator : Created Job #3 | Workload=300 ms | Relative Deadline=600 ms
+[SEYA_EDF] Scheduler : Scheduled Job #3 (Deadline: 600 ms). Arming one-shot timer.
+[SEYA_EDF] Worker    : >>> Executing Job #3 (Simulated workload: 300 ms)...
+[SEYA_EDF] Logger    : [MET] Job #3 COMPLETED ON TIME! (Exec=300 ms <= Deadline=600 ms)
+[SEYA_EDF] Logger    : [STATS] Met: 2 | Missed: 1 | Total: 3 | Success Rate: 66.7%
+[SEYA_EDF] Scheduler : Accounting event processed via ulTaskNotifyTake(). Total tallied events=3
+[SEYA_EDF] Generator : Created Job #4 | Workload=900 ms | Relative Deadline=450 ms
+[SEYA_EDF] Scheduler : Scheduled Job #4 (Deadline: 450 ms). Arming one-shot timer.
+[SEYA_EDF] Worker    : >>> Executing Job #4 (Simulated workload: 900 ms)...
+[SEYA_EDF] Logger    : [!] *** MISSED DEADLINE *** Job #4! (Deadline 450 ms expired)
+[SEYA_EDF] Logger    : [STATS] Met: 2 | Missed: 2 | Total: 4 | Success Rate: 50.0%
+[SEYA_EDF] Scheduler : Accounting event processed via ulTaskNotifyTake(). Total tallied events=4
+[SEYA_EDF] Logger    : [LATE] Job #4 finished overdue workload (900 ms) after deadline.
+[SEYA_EDF] Generator : Created Job #5 | Workload=500 ms | Relative Deadline=800 ms
+[SEYA_EDF] Scheduler : Scheduled Job #5 (Deadline: 800 ms). Arming one-shot timer.
+[SEYA_EDF] Worker    : >>> Executing Job #5 (Simulated workload: 500 ms)...
+[SEYA_EDF] Logger    : [MET] Job #5 COMPLETED ON TIME! (Exec=500 ms <= Deadline=800 ms)
+[SEYA_EDF] Logger    : [STATS] Met: 3 | Missed: 2 | Total: 5 | Success Rate: 60.0%
+[SEYA_EDF] Scheduler : Accounting event processed via ulTaskNotifyTake(). Total tallied events=5
 ```
 
 ---
 
-## 4. Структура файлів
+## 3. Склад файлів проекту
 
-* `main_blinky.c` (та `Blinky_Demo/main_blinky.c`) — реалізація логіки пулу ресурсів, задач-воркерів, обгортки `safe_printf`.
-* `main.c` — перемикання режиму роботи (`#define mainCREATE_SIMPLE_BLINKY_DEMO_ONLY 1`).
-* `FreeRTOSConfig.h` — конфігураційні параметри ядра FreeRTOS.
+* `Blinky_Demo/main_blinky.c` — повна реалізація Лабораторної роботи №5 (Варіант 12).
+* `main_blinky.c` — копія для кореневої збірки/перегляду.
+* `main.c` — головна точка входу симулятора FreeRTOS (`mainCREATE_SIMPLE_BLINKY_DEMO_ONLY 1`).
+* `FreeRTOSConfig.h` — конфігураційний файл ядра FreeRTOS з увімкненими таймерами (`configUSE_TIMERS 1`).
+* `open_sln.cmd` — скрипт для швидкого відкриття Visual Studio solution (`WIN32.sln`).
 
 ---
 
-## 5. Інструкція із запуску проєкту
+## 4. Інструкція із запуску
 
-1. Завантажити ядро FreeRTOS (демо-оточення WIN32-MSVC):
-   ```cmd
-   git clone https://github.com/FreeRTOS/FreeRTOS.git
-   cd FreeRTOS
-   git submodule update --init --recursive
-   ```
-2. Скопіювати файли `main_blinky.c`, `main.c` та `FreeRTOSConfig.h` у директорію `FreeRTOS/Demo/WIN32-MSVC/`.
-3. Відкрити `WIN32.sln` у Visual Studio 2022 / 2026.
-4. Запустити проєкт (`Ctrl + F5` або `F5`).
+1. Відкрити `open_sln.cmd` або `FreeRTOS/FreeRTOS/Demo/WIN32-MSVC/WIN32.sln` у Visual Studio.
+2. Обрати конфігурацію **Debug | x64**.
+3. Запустити виконання без налагодження (`Ctrl + F5`) або з налагодженням (`F5`).
